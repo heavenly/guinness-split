@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Split the G - Guinness Scoring</title>
+    <link rel="stylesheet" href="styles.css">
+    <!-- TensorFlow.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Split the G</h1>
+            <p>Upload a photo of your pint to see if you've split the G!</p>
+        </header>
+
+        <main>
+            <div id="model-status" class="status">Loading Model...</div>
+            
+            <div class="upload-section">
+                <input type="file" id="image-upload" accept="image/*" hidden>
+                <label for="image-upload" class="button primary">Upload Photo</label>
+                <button id="camera-btn" class="button secondary">Use Camera</button>
+            </div>
+
+            <div class="canvas-container">
+                <canvas id="main-canvas"></canvas>
+                <div id="loading-overlay" class="hidden">
+                    <div class="spinner"></div>
+                    <p>Scoring...</p>
+                </div>
+            </div>
+
+            <div id="results" class="results-section hidden">
+                <div class="score-card">
+                    <h2>Your Score</h2>
+                    <div id="score-value" class="score">0.00</div>
+                    <p id="score-commentary"></p>
+                </div>
+                <div class="detections-info">
+                    <p id="g-status"></p>
+                    <p id="beer-status"></p>
+                </div>
+            </div>
+        </main>
+
+        <footer>
+            <p>Built with YOLOv8 & TensorFlow.js</p>
+        </footer>
+    </div>
+
+    <!-- Hidden video element for camera -->
+    <video id="camera-feed" playsinline class="hidden"></video>
+    
+    <script src="script.js"></script>
+</body>
+</html>
