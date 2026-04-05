@@ -1,5 +1,7 @@
 # Guinness "Split the G" Scoring App
 
+![App UI](./ui.png)
+
 A web-based application to determine if you have successfully "Split the G" on your pint of Guinness.
 
 ## Features

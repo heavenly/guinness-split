@@ -19,6 +19,7 @@ const IOU_THRESHOLD = 0.45;
 const CLASS_NAMES = ['G', 'beer', 'glass'];
 
 let model;
+let isAnimating = false;
 
 // Load Model
 async function init() {
@@ -46,10 +47,7 @@ imageUpload.addEventListener('change', async (e) => {
 
 // Process Image
 async function processImage(img) {
-    if (!model) {
-        alert('Model not loaded yet!');
-        return;
-    }
+    if (!model || isAnimating) return;
 
     loadingOverlay.classList.remove('hidden');
     resultsSection.classList.add('hidden');
@@ -62,8 +60,8 @@ async function processImage(img) {
     // Run inference
     const detections = await detect(img);
     
-    // Draw and score
-    await renderResults(img, detections);
+    // Animate and score
+    await animateResults(img, detections);
     
     loadingOverlay.classList.add('hidden');
     resultsSection.classList.remove('hidden');
@@ -95,8 +93,8 @@ async function detect(img) {
     });
 }
 
-// Non-Max Suppression and Scoring
-async function renderResults(img, rawDetections) {
+// Animate the line dropping to the meniscus
+async function animateResults(img, rawDetections) {
     const { boxes, scores, classes } = rawDetections;
     const filteredDetections = [];
     
@@ -106,11 +104,10 @@ async function renderResults(img, rawDetections) {
         (b[1] + b[3]/2) / INPUT_SIZE, 
         (b[0] + b[2]/2) / INPUT_SIZE
     ]));
-    const scoresTensor = tf.tensor1d(scores);
     
     const nmsIndices = await tf.image.nonMaxSuppressionAsync(
         boxesTensor, 
-        scoresTensor, 
+        tf.tensor1d(scores), 
         20, 
         IOU_THRESHOLD, 
         CONF_THRESHOLD
@@ -128,50 +125,71 @@ async function renderResults(img, rawDetections) {
     const gLogo = filteredDetections.find(d => d.label === 'G');
     const beerLevel = filteredDetections.find(d => d.label === 'beer');
 
-    // Visuals
-    ctx.drawImage(img, 0, 0);
-    ctx.lineWidth = 4;
-    ctx.font = 'bold 20px Georgia';
-    
-    if (gLogo) {
-        const [cx, cy, w, h] = gLogo.box;
-        const targetY = (cy / INPUT_SIZE) * mainCanvas.height;
-        const gX = ((cx - w/2) / INPUT_SIZE) * mainCanvas.width;
-        const gW = (w / INPUT_SIZE) * mainCanvas.width;
+    return new Promise((resolve) => {
+        isAnimating = true;
+        let startTime = null;
+        const duration = 1200;
 
-        ctx.setLineDash([5, 5]);
-        ctx.strokeStyle = '#C0964D';
-        ctx.beginPath();
-        ctx.moveTo(gX - 20, targetY);
-        ctx.lineTo(gX + gW + 20, targetY);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.fillStyle = '#C0964D';
-        ctx.fillText('TARGET', gX + gW + 25, targetY + 5);
-    }
+        function frame(timestamp) {
+            if (!startTime) startTime = timestamp;
+            const progress = Math.min((timestamp - startTime) / duration, 1);
+            const ease = 1 - Math.pow(1 - progress, 3);
 
-    if (beerLevel) {
-        const [cx, cy, w, h] = beerLevel.box;
-        const currentY = ((cy - h/2) / INPUT_SIZE) * mainCanvas.height;
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.beginPath();
-        ctx.moveTo(0, currentY);
-        ctx.lineTo(mainCanvas.width, currentY);
-        ctx.stroke();
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillText('MENISCUS', 20, currentY - 10);
-    }
+            ctx.drawImage(img, 0, 0);
 
-    if (gLogo && beerLevel) {
-        calculateScore(gLogo, beerLevel);
-        gStatus.textContent = '✅ Logo Detected';
-        beerStatus.textContent = '✅ Beer Level Detected';
-    } else {
-        scoreValue.textContent = 'N/A';
-        scoreCommentary.textContent = 'Could not find both the G and the beer level. Try a clearer photo!';
-        gStatus.textContent = gLogo ? '✅ Logo Detected' : '❌ Logo Not Found';
-        beerStatus.textContent = beerLevel ? '✅ Beer Level Detected' : '❌ Beer Level Not Found';
-    }
+            if (beerLevel) {
+                const [cx, cy, w, h] = beerLevel.box;
+                const finalY = ((cy - h/2) / INPUT_SIZE) * mainCanvas.height;
+                const currentY = finalY * ease;
+
+                ctx.strokeStyle = '#FFFFFF';
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.moveTo(0, currentY);
+                ctx.lineTo(mainCanvas.width, currentY);
+                ctx.stroke();
+                ctx.fillStyle = '#FFFFFF';
+                ctx.font = 'bold 20px Georgia';
+                ctx.fillText('MENISCUS', 20, currentY - 10);
+            }
+
+            if (progress < 1) {
+                requestAnimationFrame(frame);
+            } else {
+                isAnimating = false;
+                // Final static elements
+                if (gLogo) {
+                    const [cx, cy, w, h] = gLogo.box;
+                    const targetY = (cy / INPUT_SIZE) * mainCanvas.height;
+                    const gX = ((cx - w/2) / INPUT_SIZE) * mainCanvas.width;
+                    const gW = (w / INPUT_SIZE) * mainCanvas.width;
+
+                    ctx.setLineDash([5, 5]);
+                    ctx.strokeStyle = '#C0964D';
+                    ctx.beginPath();
+                    ctx.moveTo(gX - 20, targetY);
+                    ctx.lineTo(gX + gW + 20, targetY);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.fillStyle = '#C0964D';
+                    ctx.fillText('TARGET', gX + gW + 25, targetY + 5);
+                }
+
+                if (gLogo && beerLevel) {
+                    calculateScore(gLogo, beerLevel);
+                    gStatus.textContent = '✅ Logo Detected';
+                    beerStatus.textContent = '✅ Beer Level Detected';
+                } else {
+                    scoreValue.textContent = 'N/A';
+                    scoreCommentary.textContent = 'Could not find both the G and the beer level.';
+                    gStatus.textContent = gLogo ? '✅ Logo Detected' : '❌ Logo Not Found';
+                    beerStatus.textContent = beerLevel ? '✅ Beer Level Detected' : '❌ Beer Level Not Found';
+                }
+                resolve();
+            }
+        }
+        requestAnimationFrame(frame);
+    });
 }
 
 function calculateScore(gLogo, beerLevel) {
