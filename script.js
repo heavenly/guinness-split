@@ -14,7 +14,7 @@ const beerStatus = document.getElementById('beer-status');
 // Configuration
 const MODEL_PATH = './model.json';
 const INPUT_SIZE = 640;
-const CONF_THRESHOLD = 0.25;
+const CONF_THRESHOLD = 0.15; 
 const IOU_THRESHOLD = 0.45;
 const CLASS_NAMES = ['G', 'beer', 'glass'];
 
@@ -35,194 +35,201 @@ async function init() {
     }
 }
 
-// Handle Image Upload
 imageUpload.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-
     const img = new Image();
     img.onload = () => processImage(img);
     img.src = URL.createObjectURL(file);
 });
 
-// Process Image
 async function processImage(img) {
     if (!model || isAnimating) return;
-
     loadingOverlay.classList.remove('hidden');
     resultsSection.classList.add('hidden');
 
-    // Setup canvas
     mainCanvas.width = img.width;
     mainCanvas.height = img.height;
     ctx.drawImage(img, 0, 0);
 
-    // Run inference
-    const detections = await detect(img);
-    
-    // Animate and score
-    await animateResults(img, detections);
-    
-    loadingOverlay.classList.add('hidden');
-    resultsSection.classList.remove('hidden');
+    try {
+        const { detections, padInfo } = await detectAndProcess(img);
+        loadingOverlay.classList.add('hidden');
+        animateResults(img, detections, padInfo);
+    } catch (err) {
+        console.error(err);
+        loadingOverlay.classList.add('hidden');
+    }
 }
 
-// Inference logic
-async function detect(img) {
+async function detectAndProcess(img) {
     return tf.tidy(() => {
-        const tensor = tf.browser.fromPixels(img)
-            .resizeBilinear([INPUT_SIZE, INPUT_SIZE])
-            .toFloat()
-            .div(255.0);
-
-        const input = tensor.transpose([2, 0, 1]).expandDims(0);
-        const res = model.execute(input); // [1, 7, 8400]
-        const predictions = res.squeeze([0]).transpose([1, 0]);
+        const image = tf.browser.fromPixels(img);
+        const [h, w] = image.shape.slice(0, 2);
+        const scale = Math.min(INPUT_SIZE / h, INPUT_SIZE / w);
+        const newH = Math.round(h * scale);
+        const newW = Math.round(w * scale);
+        const padY = Math.floor((INPUT_SIZE - newH) / 2);
+        const padX = Math.floor((INPUT_SIZE - newW) / 2);
         
+        const resized = tf.image.resizeBilinear(image, [newH, newW]);
+        const padded = resized.pad([[padY, INPUT_SIZE - newH - padY], [padX, INPUT_SIZE - newW - padX], [0, 0]]);
+        const input = padded.div(255.0).transpose([2, 0, 1]).expandDims(0);
+        
+        const res = model.execute(input);
+        const predictions = res.squeeze([0]).transpose([1, 0]);
         const boxes = predictions.slice([0, 0], [-1, 4]);
         const scores = predictions.slice([0, 4], [-1, 3]);
         
-        const maxScores = scores.max(1);
-        const classIndices = scores.argMax(1);
-        
-        return {
-            boxes: boxes.arraySync(),
-            scores: maxScores.arraySync(),
-            classes: classIndices.arraySync()
-        };
-    });
-}
-
-// Animate the line dropping to the meniscus
-async function animateResults(img, rawDetections) {
-    const { boxes, scores, classes } = rawDetections;
-    const filteredDetections = [];
-    
-    const boxesTensor = tf.tensor2d(boxes.map(b => [
-        (b[1] - b[3]/2) / INPUT_SIZE, 
-        (b[0] - b[2]/2) / INPUT_SIZE, 
-        (b[1] + b[3]/2) / INPUT_SIZE, 
-        (b[0] + b[2]/2) / INPUT_SIZE
-    ]));
-    
-    const nmsIndices = await tf.image.nonMaxSuppressionAsync(
-        boxesTensor, 
-        tf.tensor1d(scores), 
-        20, 
-        IOU_THRESHOLD, 
-        CONF_THRESHOLD
-    );
-    
-    const indices = nmsIndices.arraySync();
-    indices.forEach(idx => {
-        filteredDetections.push({
-            box: boxes[idx],
-            score: scores[idx],
-            label: CLASS_NAMES[classes[idx]]
+        const allDetections = [];
+        const nmsBoxes = tf.tidy(() => {
+            const [cx, cy, bw, bh] = tf.split(boxes, 4, 1);
+            return tf.concat([cy.sub(bh.div(2)).div(640), cx.sub(bw.div(2)).div(640), cy.add(bh.div(2)).div(640), cx.add(bw.div(2)).div(640)], 1);
         });
-    });
 
-    const gLogo = filteredDetections.find(d => d.label === 'G');
-    const beerLevel = filteredDetections.find(d => d.label === 'beer');
-
-    return new Promise((resolve) => {
-        isAnimating = true;
-        let startTime = null;
-        const duration = 1200;
-
-        function frame(timestamp) {
-            if (!startTime) startTime = timestamp;
-            const progress = Math.min((timestamp - startTime) / duration, 1);
-            const ease = 1 - Math.pow(1 - progress, 3);
-
-            ctx.drawImage(img, 0, 0);
-
-            if (beerLevel) {
-                const [cx, cy, w, h] = beerLevel.box;
-                const finalY = ((cy - h/2) / INPUT_SIZE) * mainCanvas.height;
-                const currentY = finalY * ease;
-
-                ctx.strokeStyle = '#FFFFFF';
-                ctx.lineWidth = 4;
-                ctx.beginPath();
-                ctx.moveTo(0, currentY);
-                ctx.lineTo(mainCanvas.width, currentY);
-                ctx.stroke();
-                ctx.fillStyle = '#FFFFFF';
-                ctx.font = 'bold 20px Georgia';
-                ctx.fillText('MENISCUS', 20, currentY - 10);
-            }
-
-            if (progress < 1) {
-                requestAnimationFrame(frame);
-            } else {
-                isAnimating = false;
-                // Final static elements
-                if (gLogo) {
-                    const [cx, cy, w, h] = gLogo.box;
-                    const targetY = (cy / INPUT_SIZE) * mainCanvas.height;
-                    const gX = ((cx - w/2) / INPUT_SIZE) * mainCanvas.width;
-                    const gW = (w / INPUT_SIZE) * mainCanvas.width;
-
-                    ctx.setLineDash([5, 5]);
-                    ctx.strokeStyle = '#C0964D';
-                    ctx.beginPath();
-                    ctx.moveTo(gX - 20, targetY);
-                    ctx.lineTo(gX + gW + 20, targetY);
-                    ctx.stroke();
-                    ctx.setLineDash([]);
-                    ctx.fillStyle = '#C0964D';
-                    ctx.fillText('TARGET', gX + gW + 25, targetY + 5);
-                }
-
-                if (gLogo && beerLevel) {
-                    calculateScore(gLogo, beerLevel);
-                    gStatus.textContent = '✅ Logo Detected';
-                    beerStatus.textContent = '✅ Beer Level Detected';
-                } else {
-                    scoreValue.textContent = 'N/A';
-                    scoreCommentary.textContent = 'Could not find both the G and the beer level.';
-                    gStatus.textContent = gLogo ? '✅ Logo Detected' : '❌ Logo Not Found';
-                    beerStatus.textContent = beerLevel ? '✅ Beer Level Detected' : '❌ Beer Level Not Found';
-                }
-                resolve();
-            }
+        for (let c = 0; c < 3; c++) {
+            const classScores = scores.slice([0, c], [-1, 1]).squeeze();
+            const indices = tf.image.nonMaxSuppression(nmsBoxes, classScores, 5, IOU_THRESHOLD, CONF_THRESHOLD).arraySync();
+            indices.forEach(idx => {
+                allDetections.push({
+                    box: boxes.slice([idx, 0], [1, 4]).arraySync()[0],
+                    score: classScores.arraySync()[idx],
+                    label: CLASS_NAMES[c]
+                });
+            });
         }
-        requestAnimationFrame(frame);
+        return { detections: allDetections, padInfo: { padX, padY, scale } };
     });
 }
 
-function calculateScore(gLogo, beerLevel) {
-    const [g_cx, g_cy, g_w, g_h] = gLogo.box;
-    const [b_cx, b_cy, b_w, b_h] = beerLevel.box;
-
-    const g_center_y = g_cy; 
-    const meniscus_y = b_cy - b_h / 2;
-    const diff = Math.abs(g_center_y - meniscus_y);
-    const norm_diff = diff / g_h;
-    
-    let score = 5.0 * Math.exp(-6 * norm_diff);
-    scoreValue.textContent = score.toFixed(2);
-    
-    if (score > 4.5) {
-        scoreCommentary.textContent = "ABSOLUTELY LEGENDARY!";
-        scoreValue.style.color = '#ffd700'; 
-    } else if (score > 3.5) {
-        scoreCommentary.textContent = "Excellent work!";
-        scoreValue.style.color = '#EEE2D0';
-    } else if (score > 2.0) {
-        scoreCommentary.textContent = "A solid attempt.";
-        scoreValue.style.color = '#C0964D';
-    } else {
-        scoreCommentary.textContent = "Practice makes perfect.";
-        scoreValue.style.color = '#B22222';
-    }
-    return score;
+function mapToCanvas(coord, isY, padInfo) {
+    return isY ? ((coord - padInfo.padY) / padInfo.scale) : ((coord - padInfo.padX) / padInfo.scale);
 }
 
-cameraBtn.addEventListener('click', () => {
-    imageUpload.click();
-});
+function findExactMeniscus(img, gBox, beerBox, padInfo) {
+    const tempCanvas = document.createElement('canvas');
+    const tCtx = tempCanvas.getContext('2d');
+    tempCanvas.width = img.width;
+    tempCanvas.height = img.height;
+    tCtx.drawImage(img, 0, 0);
 
-// Init
+    const [g_cx, g_cy, g_w, g_h] = gBox;
+    const gLeft = mapToCanvas(g_cx - g_w/2, false, padInfo);
+    const gWidth = g_w / padInfo.scale;
+    const gHeight = g_h / padInfo.scale;
+
+    let scanTop, scanBottom, yoloY = null;
+    if (beerBox) {
+        yoloY = mapToCanvas(beerBox[1] - beerBox[3]/2, true, padInfo);
+        scanTop = Math.max(0, Math.round(yoloY - gHeight));
+        scanBottom = Math.min(img.height - 1, Math.round(yoloY + gHeight));
+    } else {
+        const gTop = mapToCanvas(g_cy - g_h/2, true, padInfo);
+        scanTop = Math.max(0, Math.round(gTop - gHeight));
+        scanBottom = Math.min(img.height - 1, Math.round(gTop + gHeight * 2));
+    }
+
+    const scanX = Math.max(0, Math.round(gLeft + gWidth / 2));
+    const scanWidth = Math.min(150, Math.round(gWidth * 1.5));
+    const startX = Math.max(0, Math.min(img.width - scanWidth, scanX - scanWidth/2));
+    
+    const imageData = tCtx.getImageData(startX, scanTop, scanWidth, scanBottom - scanTop).data;
+    let maxWeightedGradient = -1;
+    let bestY = -1;
+
+    for (let y = 1; y < (scanBottom - scanTop) - 1; y++) {
+        let bPrev = 0, bNext = 0;
+        for (let x = 0; x < scanWidth; x++) {
+            const offP = ((y - 1) * scanWidth + x) * 4;
+            const offN = ((y + 1) * scanWidth + x) * 4;
+            bPrev += (imageData[offP] + imageData[offP+1] + imageData[offP+2]) / 3;
+            bNext += (imageData[offN] + imageData[offN+1] + imageData[offN+2]) / 3;
+        }
+        
+        const grad = (bPrev / scanWidth) - (bNext / scanWidth);
+        const actualY = scanTop + y;
+        
+        // Weight gradient by proximity to YOLO prediction to avoid text interference
+        const weight = yoloY !== null ? Math.exp(-Math.pow(actualY - yoloY, 2) / (2 * Math.pow(gHeight/2, 2))) : 1.0;
+        const weightedGrad = grad * weight;
+
+        if (weightedGrad > maxWeightedGradient) {
+            maxWeightedGradient = weightedGrad;
+            bestY = actualY;
+        }
+    }
+    return bestY > 0 ? bestY : yoloY;
+}
+
+async function animateResults(img, detections, padInfo) {
+    isAnimating = true;
+    const gLogo = detections.find(d => d.label === 'G');
+    const beerDet = detections.find(d => d.label === 'beer');
+
+    let finalMeniscusY = null;
+    if (gLogo) {
+        finalMeniscusY = findExactMeniscus(img, gLogo.box, beerDet ? beerDet.box : null, padInfo);
+    } else if (beerDet) {
+        finalMeniscusY = mapToCanvas(beerDet.box[1] - beerDet.box[3]/2, true, padInfo);
+    }
+
+    const duration = 1200;
+    let startTime = null;
+
+    function frame(timestamp) {
+        if (!startTime) startTime = timestamp;
+        const progress = Math.min((timestamp - startTime) / duration, 1);
+        const ease = 1 - Math.pow(1 - progress, 3);
+
+        ctx.drawImage(img, 0, 0);
+
+        if (finalMeniscusY !== null) {
+            const currentY = finalMeniscusY * ease;
+            ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 4;
+            ctx.beginPath(); ctx.moveTo(0, currentY); ctx.lineTo(mainCanvas.width, currentY); ctx.stroke();
+            ctx.fillStyle = '#FFFFFF'; ctx.font = 'bold 20px Georgia'; ctx.fillText('MENISCUS', 20, currentY - 10);
+        }
+
+        if (progress < 1) {
+            requestAnimationFrame(frame);
+        } else {
+            isAnimating = false;
+            if (gLogo) {
+                const [cx, cy, w, h] = gLogo.box;
+                const targetY = mapToCanvas(cy, true, padInfo);
+                const gX = mapToCanvas(cx - w/2, false, padInfo);
+                const gW = w / padInfo.scale;
+
+                ctx.setLineDash([5, 5]); ctx.strokeStyle = '#C0964D';
+                ctx.beginPath(); ctx.moveTo(gX - 20, targetY); ctx.lineTo(gX + gW + 20, targetY); ctx.stroke();
+                ctx.setLineDash([]); ctx.fillStyle = '#C0964D'; ctx.fillText('TARGET', gX + gW + 25, targetY + 5);
+
+                if (finalMeniscusY !== null) {
+                    calculateScore(targetY, finalMeniscusY, h / padInfo.scale);
+                    gStatus.textContent = '✅ Logo Detected';
+                    beerStatus.textContent = '✅ Precision Meniscus Found';
+                }
+            } else {
+                scoreValue.textContent = 'N/A';
+                gStatus.textContent = '❌ Logo Not Found';
+            }
+            resultsSection.classList.remove('hidden');
+        }
+    }
+    requestAnimationFrame(frame);
+}
+
+function calculateScore(targetY, meniscusY, gHeight) {
+    const diff = Math.abs(targetY - meniscusY);
+    const norm_diff = diff / gHeight;
+    let score = (meniscusY >= (targetY - gHeight/2) && meniscusY <= (targetY + gHeight/2)) 
+        ? 3.75 + (1.25 * (1 - (diff / (gHeight/2))))
+        : 3.75 * Math.exp(-2.0 * Math.pow(norm_diff, 2));
+
+    scoreValue.textContent = score.toFixed(2);
+    scoreValue.style.color = score > 4.5 ? '#ffd700' : (score > 3.0 ? '#EEE2D0' : '#B22222');
+    scoreCommentary.textContent = score > 4.5 ? "ABSOLUTELY LEGENDARY!" : (score > 3.5 ? "Masterful work!" : "Practice makes perfect.");
+}
+
+cameraBtn.addEventListener('click', () => imageUpload.click());
 init();
